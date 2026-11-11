@@ -71,25 +71,71 @@ export function createFeature(projectId: number, title: string, description: str
   return id;
 }
 
+/** Выполненные и пропущенные задачи: при доработке они остаются, новые задачи идут после них. */
+const finishedTasks = (featureId: number) => q.tasks(featureId).filter((t) => t.status === "done" || t.status === "skipped");
+
 /** Запустить (или перезапустить с пожеланиями) планирование. */
 export function plan(featureId: number, feedback?: string) {
+  startPlanning(featureId, { feedback });
+}
+
+/** Доработать завершённую фичу: архитектор добавляет новые задачи к выполненным, план снова ждёт утверждения. */
+export function refine(featureId: number, request: string) {
+  const { feature } = getCtx(featureId);
+  if (feature.status !== "done") throw new UserError("Доработать можно только завершённую фичу");
+  startPlanning(featureId, { refine: request });
+}
+
+function startPlanning(featureId: number, opts: { feedback?: string; refine?: string }) {
   const { feature, project } = getCtx(featureId);
   assertProjectFree(project.id, featureId);
-  if (feedback) q.replaceTasks(featureId, []);
-  setFeature(featureId, { status: "planning", error: null, plan_feedback: feedback ?? null });
-  logEvent(featureId, null, "system", "info", { text: feedback ? "Архитектор переделывает план" : "Архитектор изучает проект" });
+  const finished = finishedTasks(featureId);
+  // Доработка (или правка её плана): если её прервать, фича возвращается в «готово» — выполненное не теряется
+  const refining = finished.length > 0;
+  const interrupted = (error: string) =>
+    setFeature(featureId, refining ? { status: "done", error: `Доработка не состоялась: ${error}` } : { status: "failed", error });
+
+  if (opts.feedback) q.replacePendingTasks(featureId, []);
+  setFeature(featureId, { status: "planning", error: null, plan_feedback: opts.feedback ?? null });
+  logEvent(featureId, null, "system", "info", {
+    text: opts.refine
+      ? `Архитектор дорабатывает фичу: ${opts.refine}`
+      : opts.feedback
+        ? "Архитектор переделывает план"
+        : "Архитектор изучает проект",
+  });
 
   launch(featureId, async () => {
-    const { res, plan } = await runArchitect(project, feature, feedback);
-    if (res.stopped) return setFeature(featureId, { status: "stopped" });
+    const { res, plan } = await runArchitect(project, feature, { ...opts, finished });
+    if (res.stopped) return refining ? interrupted("остановлено пользователем.") : setFeature(featureId, { status: "stopped" });
     if (res.sessionId) q.updateFeature(featureId, { architect_session: res.sessionId });
     if (!plan) {
       const why = res.rateLimited ? "Лимит подписки исчерпан — попробуйте позже." : res.errorText ?? "Архитектор не вернул корректный план.";
-      return setFeature(featureId, { status: "failed", error: why });
+      return interrupted(why);
     }
-    q.replaceTasks(featureId, plan.tasks);
+    q.replacePendingTasks(featureId, plan.tasks);
+    if (opts.refine) {
+      const history = feature.description ? feature.description + "\n\n" : "";
+      q.updateFeature(featureId, { description: `${history}Доработка: ${opts.refine}` });
+    }
     setFeature(featureId, { status: "awaiting_approval", plan: JSON.stringify(plan) });
   });
+}
+
+/** Удалить фичу из оркестратора. Изменения в рабочей копии проекта остаются, удаляются только снимки. */
+export async function deleteFeature(featureId: number) {
+  const { project } = getCtx(featureId);
+  if (active.has(featureId)) throw new UserError("Сначала остановите фичу", "busy");
+  const shas = q.tasks(featureId).flatMap((t) => [t.base_sha, t.commit_sha]).filter((s): s is string => !!s);
+  q.deleteFeature(featureId);
+  featureChanged(featureId);
+  if (shas.length && (await git.isRepo(project.path))) await git.dropSnapshots(project.path, shas).catch(() => {});
+}
+
+/** Проект нельзя убрать, пока в нём работает фича. */
+export function assertProjectIdle(projectId: number) {
+  for (const id of active)
+    if (q.feature(id)?.project_id === projectId) throw new UserError("В проекте работает фича — сначала остановите её", "busy");
 }
 
 /** Пользователь отредактировал задачи плана вручную. */
@@ -97,7 +143,7 @@ export function editPlan(featureId: number, planInput: unknown) {
   const { feature } = getCtx(featureId);
   if (feature.status !== "awaiting_approval") throw new UserError("План можно править только до утверждения");
   const plan = PlanSchema.parse(planInput);
-  q.replaceTasks(featureId, plan.tasks);
+  q.replacePendingTasks(featureId, plan.tasks);
   setFeature(featureId, { plan: JSON.stringify(plan) });
 }
 
@@ -175,7 +221,11 @@ export async function taskAction(taskId: number, action: "retry" | "accept" | "s
 /** После рестарта сервера процессы агентов потеряны — помечаем такие фичи остановленными. */
 export function recoverAfterRestart(features: Feature[]) {
   for (const f of features) {
-    if (["planning", "running", "summarizing"].includes(f.status)) {
+    const pending = q.tasks(f.id).some((t) => t.status !== "done" && t.status !== "skipped");
+    if (f.status === "planning" && finishedTasks(f.id).length > 0 && !pending) {
+      // прерванное планирование доработки: выполненная фича остаётся выполненной
+      q.updateFeature(f.id, { status: "done", error: "Сервер был перезапущен во время доработки — нажмите «Доработать» ещё раз" });
+    } else if (["planning", "running", "summarizing"].includes(f.status)) {
       q.updateFeature(f.id, { status: "stopped", error: "Сервер был перезапущен — нажмите «Продолжить»" });
     }
   }

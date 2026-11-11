@@ -66,20 +66,71 @@ const planJsonSchema = {
   },
 };
 
-export async function runArchitect(project: Project, feature: Feature, feedback?: string) {
-  const isReplan = !!feedback && !!feature.architect_session;
-  const text = isReplan
-    ? `Пользователь просит изменить план фичи:\n\n${feedback}\n\nВерни полностью обновлённый план.`
-    : [
-        `# Новая фича: ${feature.title}`,
-        feature.description,
-        "",
-        "## Карта проекта (из прошлых фич)",
-        project.map || "_Карты ещё нет — это первая фича. Изучи проект сам._",
-        feedback ? `\n## Пожелания пользователя к плану\n${feedback}` : "",
-        "",
-        "Изучи проект и составь план этой фичи.",
-      ].join("\n");
+/**
+ * Запросы к архитектору:
+ * - новая фича — полный контекст;
+ * - feedback — правка ещё не утверждённого плана (продолжает сессию архитектора);
+ * - refine — доработка завершённой фичи: план только из НОВЫХ задач, выполненные (finished) остаются.
+ * Если у фичи есть выполненные задачи, правка плана тоже считается правкой плана доработки.
+ */
+export async function runArchitect(
+  project: Project,
+  feature: Feature,
+  opts: { feedback?: string; refine?: string; finished?: Task[] } = {},
+) {
+  const { feedback, refine } = opts;
+  const finished = opts.finished ?? [];
+  const refining = finished.length > 0;
+  const session = feature.architect_session;
+  const onlyNew =
+    "Код проекта уже изменён выполненными задачами — изучи текущее состояние нужных файлов, а не полагайся на память. " +
+    "Верни план доработки: goal и acceptance — про доработку, tasks — только НОВЫЕ задачи (выполненные не повторяй).";
+  const doneList = [
+    "## Уже выполнено",
+    ...finished.map((t) => `- [${t.status === "done" ? "сделано" : "пропущено"}] ${t.title}`),
+    "",
+    "## Итог прошлого выполнения",
+    feature.summary || "_нет_",
+  ].join("\n");
+
+  let text: string;
+  let resume: string | null = null;
+  if (refine && session) {
+    resume = session;
+    text = [`# Доработка фичи «${feature.title}»`, "Фича выполнена по твоему плану.", "", doneList, "", "## Пользователь просит доработать", refine, "", onlyNew].join("\n");
+  } else if (feedback && session) {
+    resume = session;
+    text = refining
+      ? `Пользователь просит изменить план доработки:\n\n${feedback}\n\nВерни полностью обновлённый план доработки — только новые задачи, выполненные не повторяй.`
+      : `Пользователь просит изменить план фичи:\n\n${feedback}\n\nВерни полностью обновлённый план.`;
+  } else if (refining) {
+    text = [
+      `# Доработка фичи: ${feature.title}`,
+      "## Исходный запрос",
+      feature.description,
+      "",
+      doneList,
+      "",
+      "## Карта проекта",
+      project.map || "_нет_",
+      "",
+      "## Пользователь просит доработать",
+      refine ?? feedback ?? "",
+      "",
+      onlyNew,
+    ].join("\n");
+  } else {
+    text = [
+      `# Новая фича: ${feature.title}`,
+      feature.description,
+      "",
+      "## Карта проекта (из прошлых фич)",
+      project.map || "_Карты ещё нет — это первая фича. Изучи проект сам._",
+      feedback ? `\n## Пожелания пользователя к плану\n${feedback}` : "",
+      "",
+      "Изучи проект и составь план этой фичи.",
+    ].join("\n");
+  }
 
   const res = await runAgent({
     featureId: feature.id,
@@ -92,7 +143,7 @@ export async function runArchitect(project: Project, feature: Feature, feedback?
     allowedTools: READ_TOOLS,
     disallowedTools: NO_WRITE,
     jsonSchema: planJsonSchema,
-    resume: isReplan ? feature.architect_session : null,
+    resume,
   });
   return { res, plan: parseStructured(res, PlanSchema) };
 }

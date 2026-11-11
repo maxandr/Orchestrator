@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   api,
@@ -47,6 +47,8 @@ export default function Feature() {
   const [editing, setEditing] = useState(false);
   const [replanText, setReplanText] = useState("");
   const [replanOpen, setReplanOpen] = useState(false);
+  const [refineText, setRefineText] = useState("");
+  const navigate = useNavigate();
 
   if (error) return <div className="p-6"><ErrorBox>{error}</ErrorBox></div>;
   if (!data) return <div className="p-6 text-zinc-500">Загрузка…</div>;
@@ -72,6 +74,21 @@ export default function Feature() {
       setReplanText("");
       setReplanOpen(false);
     });
+  const refine = () =>
+    act(async () => {
+      await api("POST", `/api/features/${featureId}/refine`, { request: refineText });
+      setRefineText("");
+    });
+  async function remove() {
+    if (!window.confirm(`Удалить фичу «${feature.title}» вместе с планом и логом? Изменения в файлах проекта останутся как есть.`)) return;
+    setActionError(null);
+    try {
+      await api("DELETE", `/api/features/${featureId}`);
+      navigate(`/projects/${project.id}`);
+    } catch (err) {
+      setActionError((err as Error).message);
+    }
+  }
   const savePlan = (plan: Plan) =>
     act(async () => {
       await api("PUT", `/api/features/${featureId}/plan`, { plan });
@@ -103,6 +120,7 @@ export default function Feature() {
         {(feature.status === "stopped" || feature.status === "failed") && (
           <Button variant="primary" onClick={resume}>▶ Продолжить</Button>
         )}
+        {!busy && <Button variant="ghost" onClick={remove} title="Удалить фичу из оркестратора">Удалить</Button>}
       </div>
 
       <div className="space-y-2 px-5 pt-3 empty:hidden">
@@ -120,7 +138,7 @@ export default function Feature() {
             </Card>
           )}
 
-          {feature.status === "planning" && !feature.plan && (
+          {feature.status === "planning" && (
             <Card className="flex items-center gap-3 p-4 text-sm text-zinc-300">
               <Spinner /> Архитектор (Opus) изучает проект и составляет план…
             </Card>
@@ -203,6 +221,22 @@ export default function Feature() {
             <Card className="border-emerald-900 p-4">
               <div className="mb-1 text-xs text-emerald-400">Итог фичи</div>
               <Md>{feature.summary}</Md>
+            </Card>
+          )}
+
+          {feature.status === "done" && (
+            <Card className="space-y-2 p-4">
+              <div className="text-sm font-medium">Доработать</div>
+              <textarea
+                className={`${inputCls} min-h-20`}
+                placeholder="Что поправить или добавить? Например: «удали устаревшую строку Planned в ProjectMap.md», «добавь звук при подборе»"
+                value={refineText}
+                onChange={(e) => setRefineText(e.target.value)}
+              />
+              <div className="flex items-center gap-3">
+                <Button variant="primary" disabled={!refineText.trim()} onClick={refine}>Отправить архитектору</Button>
+                <span className="text-xs text-zinc-500">Архитектор добавит новые задачи к выполненным — план снова придёт на утверждение.</span>
+              </div>
             </Card>
           )}
         </div>

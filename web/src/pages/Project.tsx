@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, featureStatusColor, featureStatusLabel, useResource, type Feature, type Project as P } from "../api";
+import { api, featureStatusColor, featureStatusLabel, isBusy, useResource, type Feature, type Project as P } from "../api";
 import { Badge, Button, Card, ErrorBox, Md, inputCls } from "../components/ui";
 
 interface Data {
@@ -19,6 +19,7 @@ export default function Project() {
   const [mapOpen, setMapOpen] = useState(false);
   const [mapText, setMapText] = useState("");
   const [editingMap, setEditingMap] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   useEffect(() => {
     if (data && !editingMap) setMapText(data.project.map);
@@ -51,6 +52,19 @@ export default function Project() {
     navigate("/");
   }
 
+  async function removeFeature(e: React.MouseEvent, f: Omit<Feature, "plan">) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`Удалить фичу «${f.title}» вместе с планом и логом? Изменения в файлах проекта останутся как есть.`)) return;
+    setListError(null);
+    try {
+      await api("DELETE", `/api/features/${f.id}`);
+    } catch (err) {
+      setListError((err as Error).message);
+    }
+    reload();
+  }
+
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       <div className="flex items-start justify-between gap-4">
@@ -74,12 +88,12 @@ export default function Project() {
           <input className={inputCls} placeholder="Название: «Движение игрока», «Инвентарь», «Главное меню»…" value={title} onChange={(e) => setTitle(e.target.value)} />
           <textarea
             className={`${inputCls} min-h-28`}
-            placeholder="Опишите, что должно получиться: управление, поведение, ограничения, на что похоже. Чем конкретнее — тем лучше план."
+            placeholder="Опишите, что должно получиться: управление, поведение, ограничения, на что похоже. Чем конкретнее — тем лучше план. Без описания архитектору не отдать."
             value={desc}
             onChange={(e) => setDesc(e.target.value)}
           />
           <div className="flex items-center gap-3">
-            <Button variant="primary" disabled={!title.trim()}>Отдать архитектору</Button>
+            <Button variant="primary" disabled={!title.trim() || !desc.trim()}>Отдать архитектору</Button>
             <span className="text-xs text-zinc-500">Opus изучит проект и предложит план — вы его утвердите.</span>
           </div>
           {formError && <ErrorBox>{formError}</ErrorBox>}
@@ -89,6 +103,7 @@ export default function Project() {
       <div>
         <h2 className="mb-2 font-medium">Фичи</h2>
         {features.length === 0 && <p className="text-sm text-zinc-500">Пока ни одной.</p>}
+        {listError && <div className="mb-2"><ErrorBox>{listError}</ErrorBox></div>}
         <div className="space-y-2">
           {features.map((f) => (
             <Link key={f.id} to={`/features/${f.id}`}>
@@ -97,7 +112,18 @@ export default function Project() {
                   <div className="font-medium">{f.title}</div>
                   {f.description && <div className="truncate text-xs text-zinc-500">{f.description}</div>}
                 </div>
-                <Badge className={featureStatusColor[f.status]}>{featureStatusLabel[f.status]}</Badge>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge className={featureStatusColor[f.status]}>{featureStatusLabel[f.status]}</Badge>
+                  {!isBusy(f.status) && (
+                    <button
+                      className="rounded px-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-rose-300"
+                      title="Удалить фичу"
+                      onClick={(e) => removeFeature(e, f)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </Card>
             </Link>
           ))}

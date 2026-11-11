@@ -8,6 +8,7 @@ export const db = new DatabaseSync(join(DATA_DIR, "orchestrator.db"));
 
 db.exec(`
 PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -130,7 +131,12 @@ export const q = {
   project: (id: number) => db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as unknown as Project | undefined,
   addProject: (name: string, path: string) =>
     Number(db.prepare("INSERT INTO projects (name, path) VALUES (?, ?)").run(name, path).lastInsertRowid),
-  deleteProject: (id: number) => db.prepare("DELETE FROM projects WHERE id = ?").run(id),
+  deleteProject: (id: number) => {
+    db.prepare("DELETE FROM events WHERE feature_id IN (SELECT id FROM features WHERE project_id = ?)").run(id);
+    db.prepare("DELETE FROM tasks WHERE feature_id IN (SELECT id FROM features WHERE project_id = ?)").run(id);
+    db.prepare("DELETE FROM features WHERE project_id = ?").run(id);
+    db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+  },
   setProjectMap: (id: number, map: string) => db.prepare("UPDATE projects SET map = ? WHERE id = ?").run(map, id),
 
   features: (projectId: number) =>
@@ -148,10 +154,20 @@ export const q = {
   tasks: (featureId: number) =>
     db.prepare("SELECT * FROM tasks WHERE feature_id = ? ORDER BY idx").all(featureId) as unknown as Task[],
   task: (id: number) => db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as unknown as Task | undefined,
-  replaceTasks: (featureId: number, tasks: { title: string; role: string; brief: string; verify: string }[]) => {
-    db.prepare("DELETE FROM tasks WHERE feature_id = ?").run(featureId);
+  /**
+   * Заменить невыполненные (pending) задачи фичи на новые. Выполненные и пропущенные задачи
+   * (со снимками) остаются, новые нумеруются после них — так работает и первый план, и доработка.
+   */
+  replacePendingTasks: (featureId: number, tasks: { title: string; role: string; brief: string; verify: string }[]) => {
+    db.prepare("DELETE FROM tasks WHERE feature_id = ? AND status = 'pending'").run(featureId);
+    const { next } = db.prepare("SELECT COALESCE(MAX(idx) + 1, 0) AS next FROM tasks WHERE feature_id = ?").get(featureId) as { next: number };
     const ins = db.prepare("INSERT INTO tasks (feature_id, idx, title, role, brief, verify) VALUES (?, ?, ?, ?, ?, ?)");
-    tasks.forEach((t, i) => ins.run(featureId, i, t.title, t.role, t.brief, t.verify));
+    tasks.forEach((t, i) => ins.run(featureId, next + i, t.title, t.role, t.brief, t.verify));
+  },
+  deleteFeature: (id: number) => {
+    db.prepare("DELETE FROM events WHERE feature_id = ?").run(id);
+    db.prepare("DELETE FROM tasks WHERE feature_id = ?").run(id);
+    db.prepare("DELETE FROM features WHERE id = ?").run(id);
   },
   updateTask: (id: number, fields: Partial<Record<keyof Task, Val>>) => update("tasks", id, fields),
 

@@ -68,6 +68,13 @@ export async function snapshot(cwd: string) {
   return sha;
 }
 
+/** Удалить ссылки refs/orchestrator/<sha> на снимки (при удалении фичи). Рабочую копию не трогает. */
+export async function dropSnapshots(cwd: string, shas: string[]) {
+  for (const sha of new Set(shas)) {
+    await exec("git", ["update-ref", "-d", `refs/orchestrator/${sha}`], { cwd });
+  }
+}
+
 /** Изменённые пути между двумя tree-ish: { path → A|M|D|T }. */
 async function changes(cwd: string, from: string, to: string) {
   const parts = splitZ(await git(cwd, ["diff", "--name-status", "--no-renames", "-z", from, to]));

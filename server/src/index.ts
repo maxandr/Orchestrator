@@ -5,7 +5,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { z, ZodError } from "zod";
 import { PORT, WEB_DIST } from "./config.js";
-import { db, q } from "./db.js";
+import { q } from "./db.js";
 import { bus, type BusMessage } from "./bus.js";
 import * as orch from "./orchestrator.js";
 import { UserError } from "./orchestrator.js";
@@ -62,6 +62,7 @@ app.put("/api/projects/:id/map", async (req) => {
 });
 
 app.delete("/api/projects/:id", async (req) => {
+  orch.assertProjectIdle(id(req.params));
   q.deleteProject(id(req.params));
   return { ok: true };
 });
@@ -69,8 +70,13 @@ app.delete("/api/projects/:id", async (req) => {
 /* ───────── Фичи ───────── */
 
 app.post("/api/projects/:id/features", async (req) => {
-  const body = z.object({ title: z.string().min(1), description: z.string().default("") }).parse(req.body);
-  return { id: orch.createFeature(id(req.params), body.title.trim(), body.description.trim()) };
+  const body = z
+    .object({
+      title: z.string().trim().min(1, "Укажите название"),
+      description: z.string().trim().min(1, "Опишите, что нужно сделать — без описания архитектор будет додумывать фичу сам"),
+    })
+    .parse(req.body);
+  return { id: orch.createFeature(id(req.params), body.title, body.description) };
 });
 
 app.get("/api/features/:id", async (req) => {
@@ -97,6 +103,11 @@ app.post("/api/features/:id/replan", async (req) => {
   orch.plan(id(req.params), feedback);
   return { ok: true };
 });
+app.post("/api/features/:id/refine", async (req) => {
+  const { request } = z.object({ request: z.string().trim().min(1, "Опишите, что доработать") }).parse(req.body);
+  orch.refine(id(req.params), request);
+  return { ok: true };
+});
 app.put("/api/features/:id/plan", async (req) => {
   orch.editPlan(id(req.params), (req.body as { plan: unknown }).plan);
   return { ok: true };
@@ -110,10 +121,7 @@ app.post("/api/features/:id/resume", async (req) => {
   return { ok: true };
 });
 app.delete("/api/features/:id", async (req) => {
-  const f = q.feature(id(req.params));
-  if (f && ["planning", "running", "summarizing"].includes(f.status)) throw new UserError("Сначала остановите фичу", "busy");
-  db.prepare("DELETE FROM events WHERE feature_id = ?").run(id(req.params));
-  db.prepare("DELETE FROM features WHERE id = ?").run(id(req.params));
+  await orch.deleteFeature(id(req.params));
   return { ok: true };
 });
 
