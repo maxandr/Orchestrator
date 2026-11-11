@@ -136,3 +136,98 @@ export async function revertTask(cwd: string, base: string, after: string) {
   await restore(cwd, base, own);
   return { conflicts: [] as string[] };
 }
+
+/*
+ * Коммит и пуш — только по явным кнопкам пользователя на странице проекта (это его коммиты, с его git-идентичностью).
+ * Сами по себе оркестратор и агенты не коммитят и не пушат. Снимки refs/orchestrator/* никуда не уходят.
+ */
+
+export interface PushStatus {
+  /** Текущая ветка; null — detached HEAD или нет коммитов. */
+  branch: string | null;
+  /** Основная ветка проекта (main, иначе master); null — нет ни той, ни другой. */
+  main: string | null;
+  /** Remote для пуша (origin, если есть). */
+  remote: string | null;
+  /** Есть незакоммиченные изменения (с учётом .gitignore). */
+  dirty: boolean;
+  /** Коммитов основной ветки, которых нет в remote (по последним известным данным, без fetch). */
+  ahead: number;
+  behind: number;
+}
+
+const ok = async (cwd: string, args: string[]) => (await exec("git", args, { cwd })).code === 0;
+
+async function remoteName(cwd: string) {
+  const remotes = (await exec("git", ["remote"], { cwd })).stdout.split(/\r?\n/).filter(Boolean);
+  return remotes.includes("origin") ? "origin" : (remotes[0] ?? null);
+}
+
+async function mainBranch(cwd: string) {
+  for (const b of ["main", "master"]) if (await ok(cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`])) return b;
+  return null;
+}
+
+async function isDirty(cwd: string) {
+  return (await worktreeTree(cwd)) !== (await git(cwd, ["rev-parse", "HEAD^{tree}"])).trim();
+}
+
+export async function pushStatus(cwd: string): Promise<PushStatus> {
+  const commits = await hasCommits(cwd);
+  const branchR = await exec("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd });
+  const branch = commits && branchR.code === 0 ? branchR.stdout.trim() : null;
+  const main = await mainBranch(cwd);
+  const remote = await remoteName(cwd);
+  const status: PushStatus = { branch, main, remote, dirty: commits ? await isDirty(cwd) : false, ahead: 0, behind: 0 };
+  if (main && remote && (await ok(cwd, ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${main}`]))) {
+    const counts = await exec("git", ["rev-list", "--left-right", "--count", `${remote}/${main}...${main}`], { cwd });
+    const [behind, ahead] = counts.stdout.trim().split(/\s+/).map(Number);
+    if (counts.code === 0) Object.assign(status, { ahead, behind });
+  } else if (main) {
+    status.ahead = Number((await exec("git", ["rev-list", "--count", main], { cwd })).stdout.trim()) || 0;
+  }
+  return status;
+}
+
+async function pushRef(cwd: string, remote: string, branch: string) {
+  // GIT_TERMINAL_PROMPT=0 — не зависать на запросе логина в консоли (сервер её не видит)
+  const args = ["push", "-u", remote, `refs/heads/${branch}:refs/heads/${branch}`];
+  const r = await exec("git", args, { cwd, timeoutMs: 300_000, env: { GIT_TERMINAL_PROMPT: "0" } });
+  if (r.timedOut) throw new Error("git push не завершился за 5 минут");
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.trim() || r.stdout.trim()}`);
+  return r.stderr.trim() || r.stdout.trim(); // итог пуша git пишет в stderr
+}
+
+/** Закоммитить все изменения рабочей копии в main (нужно быть на ней) и запушить main. */
+export async function commitPushMain(cwd: string, message: string) {
+  const s = await pushStatus(cwd);
+  if (!s.main) throw new Error("В репозитории нет ветки main (или master)");
+  if (s.branch !== s.main) throw new Error(`Сейчас выбрана ветка «${s.branch ?? "detached HEAD"}» — переключитесь на ${s.main}`);
+  if (!s.remote) throw new Error("У репозитория нет remote — добавьте его: git remote add origin <url>");
+  let commit: string | null = null;
+  if (s.dirty) {
+    await git(cwd, ["add", "-A"]);
+    await git(cwd, ["commit", "-m", message]);
+    commit = (await git(cwd, ["rev-parse", "--short", "HEAD"])).trim();
+  }
+  return { commit, branch: s.main, output: await pushRef(cwd, s.remote, s.main) };
+}
+
+/**
+ * Закоммитить текущую рабочую копию в новую ветку от HEAD и запушить её.
+ * HEAD, текущая ветка, индекс и файлы не меняются — изменения остаются незакоммиченными в текущей ветке.
+ */
+export async function commitPushBranch(cwd: string, message: string, branch: string) {
+  const s = await pushStatus(cwd);
+  if (!(await hasCommits(cwd))) throw new Error("В репозитории ещё нет коммитов");
+  if (!s.remote) throw new Error("У репозитория нет remote — добавьте его: git remote add origin <url>");
+  if (await ok(cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])) throw new Error(`Ветка ${branch} уже есть`);
+  let sha = (await git(cwd, ["rev-parse", "HEAD"])).trim();
+  let commit: string | null = null;
+  if (s.dirty) {
+    sha = (await git(cwd, ["commit-tree", await worktreeTree(cwd), "-p", "HEAD", "-m", message])).trim();
+    commit = sha.slice(0, 7);
+  }
+  await git(cwd, ["update-ref", `refs/heads/${branch}`, sha, ""]);
+  return { commit, branch, output: await pushRef(cwd, s.remote, branch) };
+}

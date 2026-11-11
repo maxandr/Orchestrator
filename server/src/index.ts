@@ -11,6 +11,7 @@ import * as orch from "./orchestrator.js";
 import { UserError } from "./orchestrator.js";
 import { isUnityProject, unityVersion } from "./unity.js";
 import * as git from "./git.js";
+import { exec } from "./exec.js";
 
 const app = Fastify({ logger: { level: "warn" } });
 await app.register(websocket);
@@ -82,11 +83,42 @@ app.post("/api/projects/:id/features", async (req) => {
 app.get("/api/features/:id", async (req) => {
   const feature = q.feature(id(req.params));
   if (!feature) throw new UserError("Фича не найдена", "not_found");
+  const project = q.project(feature.project_id);
   return {
     feature: { ...feature, plan: feature.plan ? JSON.parse(feature.plan) : null },
     tasks: q.tasks(feature.id),
-    project: q.project(feature.project_id),
+    project,
+    git: project && (await git.isRepo(project.path)) ? await git.pushStatus(project.path) : null,
   };
+});
+
+/** Имя новой ветки: orchestrator/feature-12-2026-11-11-1530 (+ -2, -3… если занято). */
+async function newBranchName(cwd: string, featureId: number) {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const base = `orchestrator/feature-${featureId}-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  for (let i = 1; ; i++) {
+    const name = i === 1 ? base : `${base}-${i}`;
+    if ((await exec("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], { cwd })).code !== 0) return name;
+  }
+}
+
+/** Коммит + пуш изменений фичи — только по кнопкам пользователя и не во время работы фичи в проекте. */
+app.post("/api/features/:id/commit-push", async (req) => {
+  const body = z.object({ target: z.enum(["main", "branch"]), message: z.string().optional() }).parse(req.body);
+  const feature = q.feature(id(req.params));
+  if (!feature) throw new UserError("Фича не найдена", "not_found");
+  const project = q.project(feature.project_id)!;
+  orch.assertProjectIdle(project.id);
+  if (!(await git.isRepo(project.path))) throw new UserError("Проект не в git-репозитории");
+  const message = body.message?.trim() || `Оркестратор: ${feature.title}`;
+  try {
+    return body.target === "main"
+      ? await git.commitPushMain(project.path, message)
+      : await git.commitPushBranch(project.path, message, await newBranchName(project.path, feature.id));
+  } catch (err) {
+    throw new UserError((err as Error).message);
+  }
 });
 
 app.get("/api/features/:id/events", async (req) => {

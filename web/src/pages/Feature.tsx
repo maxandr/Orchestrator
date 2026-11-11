@@ -17,11 +17,13 @@ import {
 import AgentLog, { useFeatureEvents } from "../components/AgentLog";
 import PlanEditor from "../components/PlanEditor";
 import { Badge, Button, Card, ErrorBox, Md, Spinner, inputCls } from "../components/ui";
+import { GitPanel, type PushStatus } from "../components/GitPanel";
 
 interface Data {
   feature: F;
   tasks: Task[];
   project: Project;
+  git: PushStatus | null;
 }
 
 const taskColor: Record<string, string> = {
@@ -223,6 +225,8 @@ export default function Feature() {
               <Md>{feature.summary}</Md>
             </Card>
           )}
+
+          {data.git && done > 0 && <GitPanel featureId={featureId} status={data.git} busy={busy} onDone={reload} />}
 
           {feature.status === "done" && (
             <Card className="space-y-2 p-4">

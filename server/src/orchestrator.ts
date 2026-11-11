@@ -3,7 +3,7 @@ import { featureChanged, logEvent } from "./bus.js";
 import { MAX_ATTEMPTS } from "./config.js";
 import * as git from "./git.js";
 import { checkCompile, runEditModeTests, type CheckResult } from "./unity.js";
-import { clearStop, isStopped, stopFeatureAgents } from "./agents/runAgent.js";
+import { API_BLOCKED_MSG, clearStop, isStopped, stopFeatureAgents } from "./agents/runAgent.js";
 import { PlanSchema, runArchitect, runExecutor, runReviewer, runSummarizer, type Plan } from "./agents/roles.js";
 
 export class UserError extends Error {
@@ -110,7 +110,7 @@ function startPlanning(featureId: number, opts: { feedback?: string; refine?: st
     if (res.stopped) return refining ? interrupted("остановлено пользователем.") : setFeature(featureId, { status: "stopped" });
     if (res.sessionId) q.updateFeature(featureId, { architect_session: res.sessionId });
     if (!plan) {
-      const why = res.rateLimited ? "Лимит подписки исчерпан — попробуйте позже." : res.errorText ?? "Архитектор не вернул корректный план.";
+      const why = res.apiBlocked ? (res.errorText ?? API_BLOCKED_MSG) : res.rateLimited ? "Лимит подписки исчерпан — попробуйте позже." : res.errorText ?? "Архитектор не вернул корректный план.";
       return interrupted(why);
     }
     q.replacePendingTasks(featureId, plan.tasks);
@@ -252,6 +252,7 @@ async function runTasks(featureId: number) {
 
     const outcome = await runTask(featureId, plan, task, tasks.length);
     if (outcome === "stopped") return setFeature(featureId, { status: "stopped" });
+    if (outcome === "api_blocked") return setFeature(featureId, { status: "stopped", error: API_BLOCKED_MSG });
     if (outcome === "rate_limited")
       return setFeature(featureId, { status: "stopped", error: "Лимит подписки исчерпан. Нажмите «Продолжить», когда лимит обновится." });
     if (outcome === "needs_user")
@@ -263,6 +264,7 @@ async function runTasks(featureId: number) {
   const fresh = q.feature(featureId)!;
   const { res, out } = await runSummarizer(q.project(project.id)!, fresh, plan, q.tasks(featureId));
   if (res.stopped) return setFeature(featureId, { status: "stopped" });
+  if (res.apiBlocked) return setFeature(featureId, { status: "stopped", error: API_BLOCKED_MSG });
   if (out) {
     q.setProjectMap(project.id, out.projectMap);
     setFeature(featureId, { status: "done", summary: out.summary, error: null });
@@ -271,7 +273,7 @@ async function runTasks(featureId: number) {
   }
 }
 
-type Outcome = "done" | "needs_user" | "stopped" | "rate_limited";
+type Outcome = "done" | "needs_user" | "stopped" | "rate_limited" | "api_blocked";
 
 async function runTask(featureId: number, plan: Plan, task: Task, total: number): Promise<Outcome> {
   const { project } = getCtx(featureId);
@@ -290,6 +292,10 @@ async function runTask(featureId: number, plan: Plan, task: Task, total: number)
     const exec = await runExecutor(q.project(project.id)!, feature, plan, task, total, feedback);
     if (exec.stopped) return "stopped";
     if (exec.sessionId) setTask(task, { executor_session: exec.sessionId });
+    if (exec.apiBlocked) {
+      setTask(task, { status: "pending", attempts: task.attempts - 1 });
+      return "api_blocked";
+    }
     if (exec.rateLimited) {
       setTask(task, { status: "pending", attempts: task.attempts - 1 });
       return "rate_limited";
@@ -318,6 +324,10 @@ async function runTask(featureId: number, plan: Plan, task: Task, total: number)
     }
     const { res, review } = await runReviewer(q.project(project.id)!, feature, task, exec.text, qa.text, diff);
     if (res.stopped) return "stopped";
+    if (res.apiBlocked) {
+      setTask(task, { status: "pending", attempts: task.attempts - 1 });
+      return "api_blocked";
+    }
     if (res.rateLimited) {
       setTask(task, { status: "pending", attempts: task.attempts - 1 });
       return "rate_limited";

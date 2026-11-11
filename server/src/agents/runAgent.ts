@@ -30,7 +30,27 @@ export interface AgentResult {
   isError: boolean;
   stopped: boolean;
   rateLimited: boolean;
+  /** CLI пытался работать не по подписке (API-ключ, Bedrock/Vertex…) — агент убит до работы. */
+  apiBlocked: boolean;
   errorText?: string;
+}
+
+/*
+ * Агенты работают ТОЛЬКО по подписке Claude, никогда по API.
+ * 1) Из окружения агента убираются переменные, переключающие CLI на API-ключ или облачных провайдеров.
+ *    CLAUDE_CODE_OAUTH_TOKEN (токен подписки из `claude setup-token`) остаётся.
+ * 2) В событии system/init CLI сообщает apiKeySource; при подписке это "none". Любое другое значение
+ *    (ANTHROPIC_API_KEY, apiKeyHelper, ключ из /login через Console…) — агент сразу убивается.
+ */
+const API_ENV = /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_BEDROCK_.*|ANTHROPIC_VERTEX_.*|ANTHROPIC_FOUNDRY_.*|CLAUDE_CODE_USE_.*|CLAUDE_CODE_SKIP_.*_AUTH|AWS_BEARER_TOKEN_BEDROCK)$/i;
+
+export const API_BLOCKED_MSG =
+  "Claude пытался работать по API, а не по подписке — агент остановлен. Выполните `claude /logout`, затем `claude /login` с аккаунтом подписки (Pro/Max) и уберите API-ключ / apiKeyHelper из настроек Claude Code.";
+
+function subscriptionEnv() {
+  const env: Record<string, string | undefined> = { ...process.env, FORCE_COLOR: "0" };
+  for (const k of Object.keys(env)) if (API_ENV.test(k)) delete env[k];
+  return env;
 }
 
 /** Активные процессы по фиче — чтобы кнопка «Стоп» могла их убить. */
@@ -80,7 +100,7 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
   return new Promise((resolve) => {
     const child = spawn(CLAUDE_BIN, args, {
       cwd: o.cwd,
-      env: { ...process.env, FORCE_COLOR: "0" },
+      env: subscriptionEnv(),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -95,9 +115,19 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
       isError: false,
       stopped: false,
       rateLimited: false,
+      apiBlocked: false,
     };
     let stderr = "";
     let gotResult = false;
+    let authChecked = false;
+    const blockApi = (source: string) => {
+      if (result.apiBlocked) return;
+      result.apiBlocked = true;
+      result.isError = true;
+      result.errorText = `${API_BLOCKED_MSG} (источник авторизации: ${source})`;
+      logEvent(o.featureId, o.taskId, o.agent, "error", { text: result.errorText });
+      killTree(child);
+    };
 
     child.stdin.end(o.prompt);
     child.stderr.on("data", (d) => (stderr += d.toString()));
@@ -110,7 +140,16 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
       } catch {
         return;
       }
+      if (result.apiBlocked) return;
       if (ev.session_id) result.sessionId = ev.session_id;
+
+      if (ev.type === "system" && ev.subtype === "init") {
+        authChecked = true;
+        if (ev.apiKeySource !== "none") return blockApi(String(ev.apiKeySource ?? "не указан"));
+      } else if (!authChecked && (ev.type === "assistant" || ev.type === "user" || ev.type === "result")) {
+        // ответ модели пришёл раньше проверки авторизации — не доверяем
+        return blockApi("неизвестен: CLI не прислал init");
+      }
 
       switch (ev.type) {
         case "assistant": {
@@ -177,7 +216,9 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
 
     child.on("close", (code) => {
       set.delete(child);
-      if (isStopped(o.featureId)) {
+      if (result.apiBlocked) {
+        // уже залогировано в blockApi
+      } else if (isStopped(o.featureId)) {
         result.stopped = true;
         logEvent(o.featureId, o.taskId, o.agent, "stopped", {});
       } else if (!gotResult) {
