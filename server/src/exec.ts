@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { killTree, trackProcess } from "./procs.js";
 
 export interface ExecResult {
   code: number | null;
@@ -14,11 +15,14 @@ export interface ExecOptions {
   env?: Record<string, string>;
   /** Что передать в stdin. */
   input?: string;
+  /** Фича, к которой относится процесс: «Стоп» по ней убивает и его. */
+  featureId?: number;
 }
 
 export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", ...opts.env } });
+    if (opts.featureId != null) trackProcess(opts.featureId, child);
     if (opts.input != null) child.stdin.end(opts.input);
     let stdout = "";
     let stderr = "";
@@ -26,7 +30,7 @@ export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promi
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
-          child.kill();
+          killTree(child);
         }, opts.timeoutMs)
       : null;
     child.stdout.on("data", (d) => (stdout += d.toString()));

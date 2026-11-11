@@ -3,7 +3,8 @@ import { featureChanged, logEvent } from "./bus.js";
 import { MAX_ATTEMPTS } from "./config.js";
 import * as git from "./git.js";
 import { checkCompile, runEditModeTests, type CheckResult } from "./unity.js";
-import { API_BLOCKED_MSG, clearStop, isStopped, stopFeatureAgents } from "./agents/runAgent.js";
+import { API_BLOCKED_MSG } from "./agents/runAgent.js";
+import { clearStop, isStopped, stopFeatureProcesses } from "./procs.js";
 import { PlanSchema, runArchitect, runExecutor, runReviewer, runSummarizer, type Plan } from "./agents/roles.js";
 
 export class UserError extends Error {
@@ -57,8 +58,22 @@ function launch(featureId: number, job: () => Promise<void>) {
     })
     .finally(() => {
       active.delete(featureId);
+      resetInterruptedTasks(featureId);
       featureChanged(featureId);
     });
+}
+
+/**
+ * Задача, прерванная посреди попытки (стоп, ошибка, рестарт сервера), остаётся в running/qa/review.
+ * Возвращаем её в pending, а прерванную попытку не засчитываем — иначе на странице висит «QA»,
+ * а «Продолжить» съедает одну из MAX_ATTEMPTS попыток.
+ */
+function resetInterruptedTasks(featureId: number) {
+  for (const t of q.tasks(featureId)) {
+    if (t.status !== "running" && t.status !== "qa" && t.status !== "review") continue;
+    q.updateTask(t.id, { status: "pending", attempts: Math.max(0, t.attempts - 1) });
+    logEvent(featureId, t.id, "system", "info", { text: `Задача «${t.title}» прервана — попытка не засчитана` });
+  }
 }
 
 /* ───────────── Публичные действия ───────────── */
@@ -159,11 +174,12 @@ export async function approve(featureId: number) {
 }
 
 /** Продолжить остановленную/прерванную фичу. */
-export async function resume(featureId: number) {
+export async function resume(featureId: number, comment?: string) {
   const { feature, project } = getCtx(featureId);
   if (!["stopped", "failed", "awaiting_user"].includes(feature.status)) throw new UserError("Фичу нельзя продолжить в этом состоянии");
   if (!feature.plan) return plan(featureId, feature.plan_feedback ?? undefined);
-  if (!q.tasks(featureId).some((t) => t.status !== "pending")) {
+  if (!active.has(featureId)) resetInterruptedTasks(featureId);
+  if (!q.tasks(featureId).some((t) => t.status !== "pending" || t.base_sha)) {
     // план есть, но выполнение ещё не начиналось → вернуть на утверждение
     return setFeature(featureId, { status: "awaiting_approval", error: null });
   }
@@ -171,13 +187,23 @@ export async function resume(featureId: number) {
     throw new UserError("Сначала решите, что делать с задачей, ожидающей вас");
   assertProjectFree(project.id, featureId);
   await ensureRepo(project.path);
+  const hint = comment?.trim();
+  if (hint) {
+    // Подсказка пользователя уходит исполнителю текущей задачи как первая обратная связь; попытки начинаются заново
+    const next = q.tasks(featureId).find((t) => t.status === "pending");
+    if (next) {
+      const prev = next.notes && !next.notes.startsWith("USER:") ? `\n\nПоследние замечания проверки:\n${next.notes}` : "";
+      setTask(next, { attempts: 0, notes: `USER:${hint}${prev}` });
+      logEvent(featureId, next.id, "system", "info", { text: `Подсказка пользователя: ${hint}` });
+    }
+  }
   setFeature(featureId, { status: "running", error: null });
   launch(featureId, () => runTasks(featureId));
 }
 
 export function stop(featureId: number) {
   getCtx(featureId);
-  stopFeatureAgents(featureId);
+  stopFeatureProcesses(featureId);
   logEvent(featureId, null, "system", "info", { text: "Остановлено пользователем" });
   if (!active.has(featureId)) setFeature(featureId, { status: "stopped" });
 }
@@ -221,6 +247,7 @@ export async function taskAction(taskId: number, action: "retry" | "accept" | "s
 /** После рестарта сервера процессы агентов потеряны — помечаем такие фичи остановленными. */
 export function recoverAfterRestart(features: Feature[]) {
   for (const f of features) {
+    resetInterruptedTasks(f.id);
     const pending = q.tasks(f.id).some((t) => t.status !== "done" && t.status !== "skipped");
     if (f.status === "planning" && finishedTasks(f.id).length > 0 && !pending) {
       // прерванное планирование доработки: выполненная фича остаётся выполненной
@@ -353,11 +380,13 @@ async function runTask(featureId: number, plan: Plan, task: Task, total: number)
 
 async function runQa(featureId: number, task: Task, cwd: string) {
   logEvent(featureId, task.id, "qa", "start", { model: "unity", prompt: "Проверка компиляции и тестов" });
-  const compile = await checkCompile(cwd);
+  const compile = await checkCompile(cwd, featureId);
+  if (isStopped(featureId)) return { failed: false, text: "" }; // Unity убит «Стопом» — результат не показателен
   logEvent(featureId, task.id, "qa", "check", { name: "Компиляция", ...compile });
   let tests: CheckResult | null = null;
   if (compile.status !== "failed") {
-    tests = await runEditModeTests(cwd);
+    tests = await runEditModeTests(cwd, featureId);
+    if (isStopped(featureId)) return { failed: false, text: "" };
     logEvent(featureId, task.id, "qa", "check", { name: "EditMode-тесты", ...tests });
   }
   const describe = (name: string, r: CheckResult) =>

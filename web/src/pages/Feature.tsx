@@ -50,6 +50,7 @@ export default function Feature() {
   const [replanText, setReplanText] = useState("");
   const [replanOpen, setReplanOpen] = useState(false);
   const [refineText, setRefineText] = useState("");
+  const [resumeText, setResumeText] = useState("");
   const navigate = useNavigate();
 
   if (error) return <div className="p-6"><ErrorBox>{error}</ErrorBox></div>;
@@ -68,7 +69,11 @@ export default function Feature() {
   }
 
   const approve = () => act(() => api("POST", `/api/features/${featureId}/approve`, {}));
-  const resume = () => act(() => api("POST", `/api/features/${featureId}/resume`, {}));
+  const resume = () =>
+    act(async () => {
+      await api("POST", `/api/features/${featureId}/resume`, { comment: resumeText });
+      setResumeText("");
+    });
   const stop = () => act(() => api("POST", `/api/features/${featureId}/stop`));
   const replan = () =>
     act(async () => {
@@ -227,6 +232,22 @@ export default function Feature() {
           )}
 
           {data.git && done > 0 && <GitPanel featureId={featureId} status={data.git} busy={busy} onDone={reload} />}
+
+          {(feature.status === "stopped" || feature.status === "failed") && feature.plan && tasks.some((t) => t.status === "pending") && (
+            <Card className="space-y-2 p-4">
+              <div className="text-sm font-medium">Подсказка перед продолжением</div>
+              <textarea
+                className={`${inputCls} min-h-20`}
+                placeholder="Что поправить в текущей задаче? Например: «не трогай PlayerController, сделай через событие»"
+                value={resumeText}
+                onChange={(e) => setResumeText(e.target.value)}
+              />
+              <div className="flex items-center gap-3">
+                <Button variant="primary" onClick={resume}>▶ Продолжить{resumeText.trim() ? " с подсказкой" : ""}</Button>
+                <span className="text-xs text-zinc-500">Подсказка уйдёт исполнителю следующей задачи, попытки начнутся заново. Необязательно.</span>
+              </div>
+            </Card>
+          )}
 
           {feature.status === "done" && (
             <Card className="space-y-2 p-4">

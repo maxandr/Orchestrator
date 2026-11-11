@@ -1,4 +1,5 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import { isStopped, killTree, trackProcess } from "../procs.js";
 import { createInterface } from "node:readline";
 import { CLAUDE_BIN } from "../config.js";
 import { logEvent } from "../bus.js";
@@ -53,27 +54,6 @@ function subscriptionEnv() {
   return env;
 }
 
-/** Активные процессы по фиче — чтобы кнопка «Стоп» могла их убить. */
-const running = new Map<number, Set<ChildProcess>>();
-const stoppedFeatures = new Set<number>();
-
-export function stopFeatureAgents(featureId: number) {
-  stoppedFeatures.add(featureId);
-  for (const child of running.get(featureId) ?? []) killTree(child);
-}
-export function clearStop(featureId: number) {
-  stoppedFeatures.delete(featureId);
-}
-export function isStopped(featureId: number) {
-  return stoppedFeatures.has(featureId);
-}
-
-function killTree(child: ChildProcess) {
-  if (!child.pid) return;
-  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-  else child.kill("SIGTERM");
-}
-
 const short = (s: string, n = 4000) => (s.length > n ? s.slice(0, n) + `\n… (+${s.length - n} симв.)` : s);
 
 /** Запускает `claude -p` как отдельного агента и транслирует его поток событий в лог. */
@@ -104,9 +84,7 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    const set = running.get(o.featureId) ?? new Set();
-    set.add(child);
-    running.set(o.featureId, set);
+    trackProcess(o.featureId, child);
 
     const result: AgentResult = {
       sessionId: o.resume ?? null,
@@ -215,7 +193,6 @@ export function runAgent(o: RunAgentOptions): Promise<AgentResult> {
     });
 
     child.on("close", (code) => {
-      set.delete(child);
       if (result.apiBlocked) {
         // уже залогировано в blockApi
       } else if (isStopped(o.featureId)) {

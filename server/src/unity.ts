@@ -43,8 +43,8 @@ async function isLocked(path: string) {
 }
 
 /** Редактор с пакетом Pipeline, у которого открыт этот проект. */
-async function connectedEditor(path: string) {
-  const r = await exec(UNITY_BIN, ["status", "--json", "--no-banner", "--non-interactive"], { timeoutMs: 30_000 });
+async function connectedEditor(path: string, featureId?: number) {
+  const r = await exec(UNITY_BIN, ["status", "--json", "--no-banner", "--non-interactive"], { timeoutMs: 30_000, featureId });
   try {
     const j = JSON.parse(r.stdout);
     const target = norm(path);
@@ -62,13 +62,13 @@ function extractCompileErrors(text: string) {
 }
 
 /** Проверка компиляции: в открытом редакторе через Pipeline, иначе запуском Unity в batch-режиме. */
-export async function checkCompile(path: string): Promise<CheckResult> {
-  const editor = await connectedEditor(path);
+export async function checkCompile(path: string, featureId?: number): Promise<CheckResult> {
+  const editor = await connectedEditor(path, featureId);
   if (editor) {
     const r = await exec(
       UNITY_BIN,
       ["recompile", "--project-path", path, "--timeout", "300", "--json", "--no-banner", "--non-interactive"],
-      { timeoutMs: 330_000 },
+      { timeoutMs: 330_000, featureId },
     );
     const out = r.stdout + "\n" + r.stderr;
     let errors = extractCompileErrors(out);
@@ -104,7 +104,7 @@ export async function checkCompile(path: string): Promise<CheckResult> {
     const r = await exec(
       UNITY_BIN,
       ["run", path, "--no-tail", "--log-file", logFile, "--timeout", "1500", "--non-interactive", "--no-banner", "--", "-nographics"], // -batchmode/-quit `unity run` ставит сам
-      { timeoutMs: 1_600_000 },
+      { timeoutMs: 1_600_000, featureId },
     );
     const log = existsSync(logFile) ? await readFile(logFile, "utf8") : r.stdout + r.stderr;
     const errors = extractCompileErrors(log);
@@ -143,7 +143,7 @@ async function hasTests(path: string): Promise<boolean> {
 }
 
 /** EditMode-тесты. Только при закрытом редакторе (иначе — skipped). */
-export async function runEditModeTests(path: string): Promise<CheckResult> {
+export async function runEditModeTests(path: string, featureId?: number): Promise<CheckResult> {
   if (!(await hasTests(path))) return { status: "skipped", method: "—", errors: [], details: "В проекте нет тестовых сборок." };
   if (await isLocked(path))
     return { status: "skipped", method: "—", errors: [], details: "Редактор открыт — тесты пропущены (запускаются при закрытом редакторе)." };
@@ -154,7 +154,7 @@ export async function runEditModeTests(path: string): Promise<CheckResult> {
     const r = await exec(
       UNITY_BIN,
       ["test", path, "--mode", "EditMode", "--output", out, "--timeout", "1500", "--non-interactive", "--no-banner"],
-      { timeoutMs: 1_600_000 },
+      { timeoutMs: 1_600_000, featureId },
     );
     const xml = existsSync(out) ? await readFile(out, "utf8") : "";
     const failures = [...xml.matchAll(/<test-case[^>]*name="([^"]+)"[^>]*result="Failed"[\s\S]*?<message><!\[CDATA\[([\s\S]*?)\]\]><\/message>/g)]

@@ -149,7 +149,8 @@ app.post("/api/features/:id/stop", async (req) => {
   return { ok: true };
 });
 app.post("/api/features/:id/resume", async (req) => {
-  await orch.resume(id(req.params));
+  const { comment } = z.object({ comment: z.string().optional() }).parse(req.body ?? {});
+  await orch.resume(id(req.params), comment);
   return { ok: true };
 });
 app.delete("/api/features/:id", async (req) => {
