@@ -103,7 +103,7 @@ export async function checkCompile(path: string): Promise<CheckResult> {
   try {
     const r = await exec(
       UNITY_BIN,
-      ["run", path, "--no-tail", "--log-file", logFile, "--timeout", "1500", "--non-interactive", "--no-banner", "--", "-quit", "-nographics"],
+      ["run", path, "--no-tail", "--log-file", logFile, "--timeout", "1500", "--non-interactive", "--no-banner", "--", "-nographics"], // -batchmode/-quit `unity run` ставит сам
       { timeoutMs: 1_600_000 },
     );
     const log = existsSync(logFile) ? await readFile(logFile, "utf8") : r.stdout + r.stderr;
