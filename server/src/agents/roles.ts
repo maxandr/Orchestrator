@@ -8,6 +8,12 @@ import { runAgent, type AgentResult } from "./runAgent.js";
 const prompt = (name: string) => readFileSync(join(PROMPTS_DIR, `${name}.md`), "utf8");
 const READ_TOOLS = ["Read", "Glob", "Grep"];
 const NO_WRITE = ["Edit", "Write", "NotebookEdit", "Bash"];
+/** Никто не коммитит и не пушит: исполнителю запрещены git-команды, меняющие историю, индекс или удалённый репозиторий. */
+const NO_GIT_WRITE = [
+  "commit", "push", "pull", "fetch", "merge", "rebase", "reset", "revert", "cherry-pick",
+  "checkout", "switch", "restore", "stash", "tag", "branch", "add", "rm", "mv", "clean",
+  "update-ref", "commit-tree", "am", "apply", "-C", "-c",
+].map((c) => `Bash(git ${c}:*)`);
 
 export const ROLES = ["coder", "scene", "ui"] as const;
 export type Role = (typeof ROLES)[number];
@@ -124,6 +130,7 @@ export async function runExecutor(project: Project, feature: Feature, plan: Plan
     prompt: text,
     systemPrompt: prompt("executor-common") + "\n\n" + prompt(task.role),
     allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "Skill"],
+    disallowedTools: NO_GIT_WRITE,
     canEdit: true,
     resume: canResume ? task.executor_session : null,
   });
@@ -211,7 +218,7 @@ export async function runSummarizer(project: Project, feature: Feature, plan: Pl
     "```",
     "",
     "## Задачи",
-    ...tasks.map((t) => `- [${t.status}] ${t.title}${t.commit_sha ? ` (коммит ${t.commit_sha.slice(0, 8)})` : ""}${t.notes ? ` — ${t.notes}` : ""}`),
+    ...tasks.map((t) => `- [${t.status}] ${t.title}${t.notes ? ` — ${t.notes}` : ""}`),
     "",
     "## Текущая карта проекта",
     project.map || "_нет_",

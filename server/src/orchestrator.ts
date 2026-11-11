@@ -101,19 +101,19 @@ export function editPlan(featureId: number, planInput: unknown) {
   setFeature(featureId, { plan: JSON.stringify(plan) });
 }
 
-/** Утвердить план и начать выполнение. snapshot — закоммитить чужие незакоммиченные изменения перед стартом. */
-export async function approve(featureId: number, opts: { snapshot?: boolean } = {}) {
+/** Утвердить план и начать выполнение. */
+export async function approve(featureId: number) {
   const { feature, project } = getCtx(featureId);
   if (feature.status !== "awaiting_approval") throw new UserError("План не ждёт утверждения");
   assertProjectFree(project.id, featureId);
-  await ensureCleanRepo(project.path, feature, opts.snapshot);
+  await ensureRepo(project.path);
   logEvent(featureId, null, "system", "info", { text: "План утверждён — начинаем задачи" });
   setFeature(featureId, { status: "running", error: null });
   launch(featureId, () => runTasks(featureId));
 }
 
 /** Продолжить остановленную/прерванную фичу. */
-export async function resume(featureId: number, opts: { snapshot?: boolean } = {}) {
+export async function resume(featureId: number) {
   const { feature, project } = getCtx(featureId);
   if (!["stopped", "failed", "awaiting_user"].includes(feature.status)) throw new UserError("Фичу нельзя продолжить в этом состоянии");
   if (!feature.plan) return plan(featureId, feature.plan_feedback ?? undefined);
@@ -124,8 +124,7 @@ export async function resume(featureId: number, opts: { snapshot?: boolean } = {
   if (q.tasks(featureId).some((t) => t.status === "needs_user"))
     throw new UserError("Сначала решите, что делать с задачей, ожидающей вас");
   assertProjectFree(project.id, featureId);
-  const inProgress = q.tasks(featureId).some((t) => ["running", "qa", "review"].includes(t.status));
-  if (!inProgress) await ensureCleanRepo(project.path, feature, opts.snapshot);
+  await ensureRepo(project.path);
   setFeature(featureId, { status: "running", error: null });
   launch(featureId, () => runTasks(featureId));
 }
@@ -145,18 +144,22 @@ export async function taskAction(taskId: number, action: "retry" | "accept" | "s
   if (active.has(feature.id)) throw new UserError("Сначала остановите фичу");
 
   if (action === "revert") {
-    if (task.status !== "done" || !task.commit_sha) throw new UserError("Откатить можно только выполненную задачу с коммитом");
-    await git.revertCommit(project.path, task.commit_sha);
+    if (task.status !== "done" || !task.commit_sha || !task.base_sha)
+      throw new UserError("Откатить можно только выполненную задачу со снимком");
+    const { conflicts } = await git.revertTask(project.path, task.base_sha, task.commit_sha);
+    if (conflicts.length)
+      throw new UserError(
+        `Файлы задачи менялись после её принятия — автоматический откат невозможен: ${conflicts.slice(0, 10).join(", ")}${conflicts.length > 10 ? "…" : ""}`,
+      );
     setTask(task, { status: "pending", commit_sha: null, base_sha: null, attempts: 0, executor_session: null, notes: "откатена пользователем" });
-    logEvent(feature.id, task.id, "system", "info", { text: `Задача «${task.title}» откатена (git revert)` });
+    logEvent(feature.id, task.id, "system", "info", { text: `Задача «${task.title}» откатена в рабочей копии (без коммитов)` });
     if (feature.status === "done") setFeature(feature.id, { status: "stopped" });
     return;
   }
 
   if (task.status !== "needs_user") throw new UserError("Задача не ждёт решения");
   if (action === "accept") {
-    const sha = await git.commitAll(project.path, `[orchestrator] ${feature.title}: ${task.title} (принято вручную)`);
-    setTask(task, { status: "done", commit_sha: sha, notes: "принята пользователем" });
+    setTask(task, { status: "done", commit_sha: await git.snapshot(project.path), notes: "принята пользователем" });
   } else if (action === "skip") {
     if (task.base_sha) await git.discardSince(project.path, task.base_sha);
     setTask(task, { status: "skipped", notes: "пропущена пользователем, изменения отменены" });
@@ -180,17 +183,12 @@ export function recoverAfterRestart(features: Feature[]) {
 
 /* ───────────── Внутренний цикл ───────────── */
 
-async function ensureCleanRepo(path: string, feature: Feature, snapshot?: boolean) {
-  if (!(await git.isRepo(path))) throw new UserError("Папка проекта не является git-репозиторием. Выполните git init и первый коммит.", "no_git");
-  if (!(await git.hasCommits(path))) throw new UserError("В репозитории нет ни одного коммита. Сделайте первый коммит.", "no_git");
-  const dirty = await git.dirtyFiles(path);
-  if (!dirty.length) return;
-  if (!snapshot)
-    throw new UserError(
-      `В проекте есть незакоммиченные изменения (${dirty.length} файлов). Закоммитьте их сами или разрешите оркестратору сделать снимок.`,
-      "dirty",
-    );
-  await git.commitAll(path, `[orchestrator] снимок перед фичей «${feature.title}»`);
+/**
+ * git нужен только для снимков (diff/откат задач). Оркестратор ничего не коммитит и не пушит,
+ * поэтому незакоммиченные изменения пользователя не мешают: они просто входят в базовый снимок задачи.
+ */
+async function ensureRepo(path: string) {
+  if (!(await git.isRepo(path))) throw new UserError("Папка проекта не является git-репозиторием. Выполните git init.", "no_git");
 }
 
 async function runTasks(featureId: number) {
@@ -228,7 +226,7 @@ type Outcome = "done" | "needs_user" | "stopped" | "rate_limited";
 async function runTask(featureId: number, plan: Plan, task: Task, total: number): Promise<Outcome> {
   const { project } = getCtx(featureId);
   const cwd = project.path;
-  if (!task.base_sha) setTask(task, { base_sha: await git.head(cwd) });
+  if (!task.base_sha) setTask(task, { base_sha: await git.snapshot(cwd) });
 
   // Комментарий пользователя при «Повторить» — как первая обратная связь
   let feedback: string | undefined = task.notes?.startsWith("USER:") ? `Комментарий пользователя: ${task.notes.slice(5)}` : undefined;
@@ -282,8 +280,8 @@ async function runTask(featureId: number, plan: Plan, task: Task, total: number)
     logEvent(featureId, task.id, "reviewer", "verdict", review);
 
     if (review.verdict === "accept") {
-      const sha = await git.commitAll(cwd, `[orchestrator] ${feature.title}: ${task.title}`);
-      setTask(task, { status: "done", commit_sha: sha, notes: review.feedback });
+      // Без коммита: фиксируем состояние снимком, чтобы задачу можно было откатить
+      setTask(task, { status: "done", commit_sha: await git.snapshot(cwd), notes: review.feedback });
       return "done";
     }
     feedback = `Ревьюер (архитектор) вернул на доработку:\n${review.feedback}`;

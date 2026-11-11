@@ -88,10 +88,8 @@ app.get("/api/features/:id/events", async (req) => {
   return q.events(id(req.params), after).map((e) => ({ ...e, data: JSON.parse(e.data) }));
 });
 
-const snapshotBody = z.object({ snapshot: z.boolean().optional() }).default({});
-
 app.post("/api/features/:id/approve", async (req) => {
-  await orch.approve(id(req.params), snapshotBody.parse(req.body ?? {}));
+  await orch.approve(id(req.params));
   return { ok: true };
 });
 app.post("/api/features/:id/replan", async (req) => {
@@ -108,7 +106,7 @@ app.post("/api/features/:id/stop", async (req) => {
   return { ok: true };
 });
 app.post("/api/features/:id/resume", async (req) => {
-  await orch.resume(id(req.params), snapshotBody.parse(req.body ?? {}));
+  await orch.resume(id(req.params));
   return { ok: true };
 });
 app.delete("/api/features/:id", async (req) => {

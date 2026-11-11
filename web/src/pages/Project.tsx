@@ -60,9 +60,8 @@ export default function Project() {
           <div className="text-xs text-zinc-500">{project.path}</div>
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
             <Badge className="bg-zinc-800 text-zinc-300">Unity {info.unityVersion ?? "?"}</Badge>
-            {info.git === "ok" && <Badge className="bg-emerald-500/15 text-emerald-300">git ✓</Badge>}
+            {info.git !== "none" && <Badge className="bg-emerald-500/15 text-emerald-300">git ✓</Badge>}
             {info.git === "none" && <Badge className="bg-rose-500/15 text-rose-300">нет git — выполните git init</Badge>}
-            {info.git === "no_commits" && <Badge className="bg-amber-500/15 text-amber-300">git без коммитов — сделайте первый коммит</Badge>}
             {!info.exists && <Badge className="bg-rose-500/15 text-rose-300">папка не найдена</Badge>}
           </div>
         </div>

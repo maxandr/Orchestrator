@@ -7,9 +7,19 @@ export interface ExecResult {
   timedOut: boolean;
 }
 
-export function exec(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<ExecResult> {
+export interface ExecOptions {
+  cwd?: string;
+  timeoutMs?: number;
+  /** Дополнительные переменные окружения. */
+  env?: Record<string, string>;
+  /** Что передать в stdin. */
+  input?: string;
+}
+
+export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0" } });
+    const child = spawn(cmd, args, { cwd: opts.cwd, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", ...opts.env } });
+    if (opts.input != null) child.stdin.end(opts.input);
     let stdout = "";
     let stderr = "";
     let timedOut = false;

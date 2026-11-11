@@ -53,27 +53,18 @@ export default function Feature() {
   const { feature, tasks, project } = data;
   const busy = isBusy(feature.status);
 
-  /** Выполнить действие; если в git есть чужие изменения — предложить снимок. */
-  async function act(fn: (body?: object) => Promise<unknown>) {
+  async function act(fn: () => Promise<unknown>) {
     setActionError(null);
     try {
       await fn();
     } catch (err) {
-      if (err instanceof ApiError && err.code === "dirty") {
-        if (window.confirm(`${err.message}\n\nСделать коммит-снимок текущего состояния и продолжить?`)) {
-          try {
-            await fn({ snapshot: true });
-          } catch (e: any) {
-            setActionError(e.message);
-          }
-        }
-      } else setActionError((err as Error).message);
+      setActionError((err as Error).message);
     }
     reload();
   }
 
-  const approve = () => act((b) => api("POST", `/api/features/${featureId}/approve`, b ?? {}));
-  const resume = () => act((b) => api("POST", `/api/features/${featureId}/resume`, b ?? {}));
+  const approve = () => act(() => api("POST", `/api/features/${featureId}/approve`, {}));
+  const resume = () => act(() => api("POST", `/api/features/${featureId}/resume`, {}));
   const stop = () => act(() => api("POST", `/api/features/${featureId}/stop`));
   const replan = () =>
     act(async () => {
@@ -280,7 +271,7 @@ function TaskCard({
         <div className="mt-2 space-y-2 border-t border-zinc-800 pt-2">
           <Md className="text-zinc-300">{task.brief}</Md>
           <div className="text-xs text-zinc-500">Проверка: {task.verify}</div>
-          {task.commit_sha && <div className="font-mono text-xs text-zinc-500">коммит {task.commit_sha.slice(0, 10)}</div>}
+          {task.commit_sha && <div className="font-mono text-xs text-zinc-500">снимок {task.commit_sha.slice(0, 10)}</div>}
         </div>
       )}
 
@@ -295,7 +286,7 @@ function TaskCard({
           <input className={inputCls} placeholder="Подсказка исполнителю (необязательно)" value={comment} onChange={(e) => setComment(e.target.value)} />
           <div className="flex flex-wrap gap-2">
             <Button variant="primary" disabled={!canAct} onClick={() => onAction("retry", comment)}>↻ Ещё раз</Button>
-            <Button disabled={!canAct} onClick={() => onAction("accept")} title="Вы поправили сами или результат устраивает — закоммитить как есть">
+            <Button disabled={!canAct} onClick={() => onAction("accept")} title="Вы поправили сами или результат устраивает — принять как есть (без коммита)">
               ✓ Принять как есть
             </Button>
             <Button
@@ -314,7 +305,7 @@ function TaskCard({
           <Button
             variant="ghost"
             disabled={!canAct}
-            onClick={() => window.confirm("Откатить эту задачу (git revert)? Её можно будет выполнить заново.") && onAction("revert")}
+            onClick={() => window.confirm("Откатить изменения этой задачи в рабочей копии? Её можно будет выполнить заново.") && onAction("revert")}
           >
             ↶ Откатить задачу
           </Button>
